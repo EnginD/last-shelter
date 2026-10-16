@@ -15,6 +15,16 @@ class SurvivorInfoPanel extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final isNeedActive = survivor.autoEating || survivor.autoDrinking;
+
+    final isEating = survivor.autoEating;
+
+    final progress = survivor.needActionDuration > 0
+        ? (survivor.needActionTimer / survivor.needActionDuration)
+              .clamp(0.0, 1.0)
+              .toDouble()
+        : 0.0;
+
     return Container(
       padding: const EdgeInsets.all(16),
       decoration: const BoxDecoration(
@@ -42,11 +52,55 @@ class SurvivorInfoPanel extends StatelessWidget {
                 IconButton(onPressed: onClose, icon: const Icon(Icons.close)),
               ],
             ),
+
             _statusBar('Health', survivor.health, Colors.green),
             _statusBar('Hunger', survivor.hunger, Colors.orange),
             _statusBar('Thirst', survivor.thirst, Colors.blue),
             _statusBar('Energy', survivor.energy, Colors.amber),
-            const SizedBox(height: 12),
+
+            // Yemek / su işlemi ilerleme göstergesi
+            if (isNeedActive) ...[
+              const SizedBox(height: 12),
+
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  Text(
+                    isEating ? 'Eating' : 'Drinking',
+                    style: const TextStyle(
+                      fontWeight: FontWeight.bold,
+                      fontSize: 13,
+                    ),
+                  ),
+                  Text(
+                    '${(progress * 100).toStringAsFixed(0)}%',
+                    style: const TextStyle(fontSize: 13),
+                  ),
+                ],
+              ),
+
+              const SizedBox(height: 6),
+
+              LinearProgressIndicator(
+                value: progress,
+                minHeight: 8,
+                borderRadius: BorderRadius.circular(6),
+                backgroundColor: Colors.white12,
+                color: isEating ? Colors.orange : Colors.lightBlue,
+              ),
+
+              const SizedBox(height: 4),
+
+              Text(
+                survivor.isMoving
+                    ? (isEating ? 'Moving to kitchen' : 'Moving to water room')
+                    : survivor.needActionDuration > 0
+                    ? '${survivor.needActionTimer.toStringAsFixed(1)} / '
+                          '${survivor.needActionDuration.toStringAsFixed(1)} sec'
+                    : 'Preparing...',
+                style: const TextStyle(fontSize: 11, color: Colors.white70),
+              ),
+            ],
 
             const SizedBox(height: 12),
 
@@ -60,6 +114,7 @@ class SurvivorInfoPanel extends StatelessWidget {
             Text('⚡ Electricity: ${survivor.electricitySkill}'),
             Text('💧 Water: ${survivor.waterSkill}'),
             Text('🍞 Cooking: ${survivor.cookingSkill}'),
+
             Row(
               children: [
                 const Icon(Icons.location_on_outlined),
@@ -67,7 +122,9 @@ class SurvivorInfoPanel extends StatelessWidget {
                 Expanded(child: Text('Assigned room: $roomName')),
               ],
             ),
+
             const SizedBox(height: 6),
+
             Row(
               children: [
                 Icon(switch (survivor.state) {
@@ -83,6 +140,7 @@ class SurvivorInfoPanel extends StatelessWidget {
                   SurvivorState.waitingForFood => Icons.hourglass_empty,
                   SurvivorState.waitingForWater => Icons.hourglass_empty,
                 }),
+                const SizedBox(width: 8),
                 Text(switch (survivor.state) {
                   SurvivorState.walking => 'Walking',
                   SurvivorState.working => 'Working',

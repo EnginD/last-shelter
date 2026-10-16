@@ -90,4 +90,16 @@ class ResourceManager extends ChangeNotifier {
     notifyListeners();
     return true;
   }
+
+  void setTestResources({double? food, double? water}) {
+    if (food != null) {
+      this.food = food.clamp(0.0, maxResource).toDouble();
+    }
+
+    if (water != null) {
+      this.water = water.clamp(0.0, maxResource).toDouble();
+    }
+
+    notifyListeners();
+  }
 }

@@ -3,6 +3,7 @@ import 'package:flame/events.dart';
 import 'package:flame/game.dart';
 import 'package:flutter/material.dart';
 import 'resource_manager.dart';
+import 'dart:collection';
 import '../models/survivor_candidate.dart';
 
 import 'room.dart';
@@ -21,6 +22,7 @@ class ShelterGame extends FlameGame with TapCallbacks {
   final List<ShelterRoom> rooms = [];
   final Map<Survivor, int> occupantSlot = {};
   final SurvivorNotifier selectedCharacter = SurvivorNotifier();
+  final ValueNotifier<int> uiRefresh = ValueNotifier<int>(0);
 
   int selectedSurvivor = 0;
   int nextSurvivorId = 4;
@@ -34,8 +36,80 @@ class ShelterGame extends FlameGame with TapCallbacks {
   double top = 0;
   double stairX = 0;
 
+  final ValueNotifier<String?> deathNotification = ValueNotifier<String?>(null);
+
+  final Queue<String> _deathNotificationQueue = Queue<String>();
+
+  double deathNotificationTimer = 0;
+
+  final ValueNotifier<bool> isGameOver = ValueNotifier<bool>(false);
+
+  void _checkGameOver() {
+    if (isGameOver.value || survivors.isNotEmpty) return;
+
+    isGameOver.value = true;
+
+    debugPrint('GAME OVER: Sığınaktaki herkes hayatını kaybetti.');
+  }
+
+  void _showDeathNotification(String survivorName) {
+    final message = '☠️ $survivorName hayatını kaybetti!';
+
+    _deathNotificationQueue.add(message);
+
+    _showNextDeathNotification();
+  }
+
+  void _showNextDeathNotification() {
+    // Ekranda zaten bildirim varsa bekle.
+    if (deathNotification.value != null) return;
+
+    if (_deathNotificationQueue.isEmpty) return;
+
+    deathNotification.value = _deathNotificationQueue.removeFirst();
+    deathNotificationTimer = 5.0;
+  }
+
+  void _clearNeedReservations(Survivor survivor) {
+    if (survivor.foodReserved) {
+      resourceManager.food += 1;
+      survivor.foodReserved = false;
+    }
+
+    if (survivor.waterReserved) {
+      resourceManager.water += 1;
+      survivor.waterReserved = false;
+    }
+  }
+
+  void setTestResources({double? food, double? water}) {
+    if (food != null) {
+      resourceManager.food = food;
+    }
+
+    if (water != null) {
+      resourceManager.water = water;
+    }
+  }
+
   double _skillMultiplier(int skill) {
     return 0.5 + skill.clamp(0, 100) / 100.0;
+  }
+
+  double _needMultiplier(double value) {
+    if (value >= 75) return 1.0;
+    if (value >= 50) return 0.90;
+    if (value >= 25) return 0.75;
+    return 0.50;
+  }
+
+  double _survivorEfficiency(Survivor survivor) {
+    final health = _needMultiplier(survivor.health);
+    final energy = _needMultiplier(survivor.energy);
+    final hunger = _needMultiplier(survivor.hunger);
+    final thirst = _needMultiplier(survivor.thirst);
+
+    return (health + energy + hunger + thirst) / 4.0;
   }
 
   final ResourceManager resourceManager = ResourceManager();
@@ -44,8 +118,118 @@ class ShelterGame extends FlameGame with TapCallbacks {
   double resourceUiTimer = 0;
   TextComponent? resourceText;
 
+  void Function(Survivor survivor, int roomIndex)? onRoomActionRequested;
+
   @override
   Color backgroundColor() => const Color(0xFF171B20);
+
+  double _calculateNeedDuration({
+    required double currentValue,
+    required bool isWater,
+  }) {
+    final value = currentValue.clamp(0.0, 100.0);
+
+    final minDuration = isWater ? 3.0 : 4.0;
+    final maxDuration = isWater ? 12.0 : 20.0;
+
+    return minDuration + (100.0 - value) / 100.0 * (maxDuration - minDuration);
+  }
+
+  void assignSurvivorToRoom(
+    Survivor survivor,
+    int roomIndex,
+    SurvivorRoomAction action,
+  ) {
+    final room = rooms[roomIndex];
+
+    // İşlem ile oda türünün uyumunu kontrol et.
+    if (action == SurvivorRoomAction.eat && room.type != RoomType.kitchen) {
+      return;
+    }
+
+    if (action == SurvivorRoomAction.drink && room.type != RoomType.water) {
+      return;
+    }
+
+    if (action == SurvivorRoomAction.rest && room.type != RoomType.bedroom) {
+      return;
+    }
+
+    // Önce oda atamasını yap.
+    final alreadyInRoom =
+        !survivor.isMoving && survivor.currentRoomIndex == roomIndex;
+
+    if (!alreadyInRoom) {
+      final success = _sendSurvivorToRoom(survivor, roomIndex);
+      if (!success) return;
+    }
+
+    // Önceki yemek/su rezervasyonunu temizle.
+    _clearNeedReservations(survivor);
+
+    // Önceki manuel/otomatik işlemleri temizle.
+    survivor.autoEating = false;
+    survivor.autoDrinking = false;
+    survivor.autoResting = false;
+    survivor.manualResting = false;
+
+    survivor.returnToManualRest = false;
+    survivor.manualRestRoomIndex = null;
+
+    survivor.needRoomIndex = null;
+    survivor.restRoomIndex = null;
+    survivor.needActionTimer = 0;
+    survivor.needActionDuration = 0;
+
+    survivor.roomAction = action;
+
+    // Manuel yemek veya su işlemi.
+    survivor.manualNeedAction =
+        action == SurvivorRoomAction.eat || action == SurvivorRoomAction.drink;
+
+    if (survivor.manualNeedAction) {
+      final isWater = action == SurvivorRoomAction.drink;
+
+      survivor.autoEating = !isWater;
+      survivor.autoDrinking = isWater;
+      survivor.needRoomIndex = roomIndex;
+
+      // Önce mevcut ihtiyaç seviyesini kaydet.
+      survivor.needActionStartValue = isWater
+          ? survivor.thirst
+          : survivor.hunger;
+
+      survivor.needActionTimer = 0;
+      survivor.needActionDuration = 0;
+      survivor.isWorking = false;
+      return;
+    }
+
+    if (action == SurvivorRoomAction.rest) {
+      survivor.manualResting = true;
+      survivor.isWorking = false;
+      return;
+    }
+
+    if (action == SurvivorRoomAction.work) {
+      survivor.workRoomIndex = roomIndex;
+
+      survivor.autoDrinking = false;
+      survivor.autoEating = false;
+      survivor.manualNeedAction = false;
+
+      survivor.isWorking = !survivor.isMoving;
+
+      if (!survivor.isMoving) {
+        survivor.state = SurvivorState.working;
+      }
+
+      return;
+    }
+
+    survivor.workRoomIndex = null;
+    survivor.isWorking = false;
+  }
 
   @override
   Future<void> onLoad() async {
@@ -179,33 +363,62 @@ class ShelterGame extends FlameGame with TapCallbacks {
 
   void _refreshResourceText() {
     resourceText?.text =
-        '⚡ ${resourceManager.electricity.toStringAsFixed(0)} '
+        '⚡ ${resourceManager.electricity.floor()} '
         '${_resourceTrend(resourceManager.electricityNetPerMinute)}\n'
-        '💧 ${resourceManager.water.toStringAsFixed(0)} '
+        '💧 ${resourceManager.water.floor()} '
         '${_resourceTrend(resourceManager.waterNetPerMinute)}\n'
-        '🍞 ${resourceManager.food.toStringAsFixed(0)} '
+        '🍞 ${resourceManager.food.floor()} '
         '${_resourceTrend(resourceManager.foodNetPerMinute)}\n'
         '👥 ${survivors.length}/${resourceManager.maxPopulation}';
   }
 
   List<Vector2> _buildPath(Survivor survivor, ShelterRoom targetRoom) {
     final destination = targetRoom.standingPosition;
+    final current = survivor.position.clone();
 
-    // Aynı kattaysa doğrudan ilerle.
-    if (survivor.currentFloor == targetRoom.floor) {
+    // Her katın merdiven çıkış konumunu belirle.
+    Vector2 stairPosition(int floor) {
+      final room = rooms.firstWhere((r) => r.floor == floor);
+
+      return Vector2(stairX, room.position.y + room.size.y - 10);
+    }
+
+    final targetStair = stairPosition(targetRoom.floor);
+
+    // Karakterin mevcut konumuna en yakın katı bul.
+    final floors = rooms.map((r) => r.floor).toSet().toList();
+
+    int nearestFloor = floors.first;
+    double nearestDistance = double.infinity;
+
+    for (final floor in floors) {
+      final stair = stairPosition(floor);
+      final distance = (current.y - stair.y).abs();
+
+      if (distance < nearestDistance) {
+        nearestDistance = distance;
+        nearestFloor = floor;
+      }
+    }
+
+    final currentStair = stairPosition(nearestFloor);
+
+    // Merdivenin üzerinde mi?
+    const stairTolerance = 8.0;
+
+    final isOnStairs = (current.x - stairX).abs() <= stairTolerance;
+
+    // Merdivendeyse hedef katın çıkışına git.
+    if (isOnStairs) {
+      return [targetStair, destination];
+    }
+
+    // Zaten hedef kattaysa doğrudan ilerle.
+    if (nearestFloor == targetRoom.floor) {
       return [destination];
     }
 
-    // Önce bulunduğu kattaki merdivene git.
-    final currentStair = Vector2(stairX, survivor.position.y);
-
-    // Merdivenden hedef kata geç.
-    final targetStair = Vector2(
-      stairX,
-      targetRoom.position.y + targetRoom.size.y - 10,
-    );
-
-    // Sonra hedef odaya ilerle.
+    // Başka kattaysa merdiven üzerinden git.
     return [currentStair, targetStair, destination];
   }
 
@@ -238,58 +451,61 @@ class ShelterGame extends FlameGame with TapCallbacks {
       }
     }
 
-    // Oda seçimi ve görevlendirme
+    // Oda seçimi
     for (int i = 0; i < rooms.length; i++) {
       final room = rooms[i];
 
-      if (room.toRect().contains(tap.toOffset())) {
-        final survivor = survivors[selectedSurvivor];
+      if (!room.toRect().contains(tap.toOffset())) {
+        continue;
+      }
 
-        final success = _sendSurvivorToRoom(survivor, i);
-
-        if (success) {
-          // Oyuncunun komutu otomatik dinlenmeyi iptal eder.
-          survivor.autoResting = false;
-          survivor.restRoomIndex = null;
-
-          // Oyuncunun komutu otomatik yemek/su işlemini iptal eder.
-          survivor.autoEating = false;
-          survivor.autoDrinking = false;
-          survivor.needRoomIndex = null;
-          survivor.needActionTimer = 0;
-
-          // Yeni çalışma odasını kaydet.
-          if (room.type == RoomType.power ||
-              room.type == RoomType.water ||
-              room.type == RoomType.kitchen) {
-            survivor.workRoomIndex = i;
-          } else {
-            survivor.workRoomIndex = null;
-          }
-        }
+      if (selectedSurvivor < 0 || selectedSurvivor >= survivors.length) {
         return;
       }
+
+      final survivor = survivors[selectedSurvivor];
+
+      // Yemekhane ve su odasında işlem seçimi göster.
+      if (room.type == RoomType.kitchen || room.type == RoomType.water) {
+        onRoomActionRequested?.call(survivor, i);
+        return;
+      }
+
+      // Yatakhane ve diğer odalarda mevcut görevlendirme.
+      final action = room.type == RoomType.bedroom
+          ? SurvivorRoomAction.rest
+          : room.type == RoomType.power
+          ? SurvivorRoomAction.work
+          : SurvivorRoomAction.idle;
+
+      assignSurvivorToRoom(survivor, i, action);
+      return;
     }
   }
 
   @override
   void update(double dt) {
+    if (isGameOver.value) return;
+
     super.update(dt);
 
     double electricityProduction = 0;
     double waterProduction = 0;
     double foodProduction = 0;
 
+    uiRefresh.value++;
+
     for (final survivor in survivors) {
-      // Önce hedef odaya varış ve otomatik davranışlar.
       _updateAutomaticBehavior(survivor);
       _updateAutomaticNeeds(survivor, dt);
 
-      // Enerji ve ihtiyaçları bir kez güncelle.
       survivor.updateEnergy(dt);
       survivor.updateNeeds(dt);
+      survivor.checkDeath();
 
-      // Yalnızca çalışan karakterler üretim yapar.
+      // Ölen karakter üretim yapamaz.
+      if (survivor.isDead) continue;
+
       if (survivor.isMoving ||
           survivor.autoResting ||
           survivor.autoEating ||
@@ -300,19 +516,22 @@ class ShelterGame extends FlameGame with TapCallbacks {
       }
 
       final room = rooms[survivor.assignedRoomIndex!];
+      final efficiency = _survivorEfficiency(survivor);
 
       switch (room.type) {
         case RoomType.power:
           electricityProduction +=
-              6.0 * _skillMultiplier(survivor.electricitySkill);
+              6.0 * _skillMultiplier(survivor.electricitySkill) * efficiency;
           break;
 
         case RoomType.water:
-          waterProduction += 5.0 * _skillMultiplier(survivor.waterSkill);
+          waterProduction +=
+              5.0 * _skillMultiplier(survivor.waterSkill) * efficiency;
           break;
 
         case RoomType.kitchen:
-          foodProduction += 4.0 * _skillMultiplier(survivor.cookingSkill);
+          foodProduction +=
+              4.0 * _skillMultiplier(survivor.cookingSkill) * efficiency;
           break;
 
         default:
@@ -329,6 +548,21 @@ class ShelterGame extends FlameGame with TapCallbacks {
     resourceManager.updateResources(dt);
 
     resourceUiTimer += dt;
+
+    _removeDeadSurvivors();
+
+    // Son karakter öldüyse Game Over.
+    _checkGameOver();
+
+    if (deathNotificationTimer > 0) {
+      deathNotificationTimer -= dt;
+
+      if (deathNotificationTimer <= 0) {
+        deathNotificationTimer = 0;
+        deathNotification.value = null;
+        _showNextDeathNotification();
+      }
+    }
 
     if (resourceUiTimer >= 0.5) {
       resourceUiTimer = 0;
@@ -483,6 +717,23 @@ class ShelterGame extends FlameGame with TapCallbacks {
       return;
     }
 
+    // Manuel dinlenme
+    if (survivor.manualResting) {
+      final roomIndex = survivor.currentRoomIndex;
+
+      if (roomIndex != null && rooms[roomIndex].type == RoomType.bedroom) {
+        survivor.isWorking = false;
+
+        if (survivor.energy < 100) {
+          survivor.state = SurvivorState.sleeping;
+        } else {
+          survivor.state = SurvivorState.idle;
+        }
+
+        return;
+      }
+    }
+
     // Otomatik dinlenme süreci
     if (survivor.autoResting) {
       if (survivor.restRoomIndex != null &&
@@ -490,7 +741,7 @@ class ShelterGame extends FlameGame with TapCallbacks {
         survivor.state = SurvivorState.sleeping;
         survivor.isWorking = false;
 
-        if (survivor.energy >= 95) {
+        if (survivor.energy >= 100) {
           _finishAutomaticRest(survivor);
         }
       }
@@ -500,8 +751,16 @@ class ShelterGame extends FlameGame with TapCallbacks {
 
     // Yorgunluk kontrolü
     if (survivor.energy <= 20 && survivor.workRoomIndex != null) {
-      _startAutomaticRest(survivor);
-      return;
+      final canDrink = survivor.thirst <= 25 && resourceManager.water >= 1;
+
+      final canEat = survivor.hunger <= 25 && resourceManager.food >= 1;
+
+      // Karakterin karşılanabilecek kritik ihtiyacı varsa
+      // önce _updateAutomaticNeeds() ilgilensin.
+      if (!canDrink && !canEat) {
+        _startAutomaticRest(survivor);
+        return;
+      }
     }
 
     // Normal çalışma
@@ -600,93 +859,402 @@ class ShelterGame extends FlameGame with TapCallbacks {
   }
 
   void _startAutomaticNeed(Survivor survivor, {required bool isWater}) {
+    if (survivor.isMoving || survivor.autoEating || survivor.autoDrinking) {
+      return;
+    }
+
     final roomType = isWater ? RoomType.water : RoomType.kitchen;
 
     final roomIndex = _findAvailableNeedRoom(survivor, roomType);
 
     if (roomIndex == null) return;
 
-    // Karakterin asıl görevini koru.
+    // Kaynağı karakter yola çıkmadan önce ayır.
+    final consumed = isWater
+        ? resourceManager.consumeWater(1)
+        : resourceManager.consumeFood(1);
+
+    if (!consumed) return;
+
+    final previousWorkRoom = survivor.workRoomIndex;
+    final previousAssignedRoom = survivor.assignedRoomIndex;
+
     survivor.workRoomIndex ??= survivor.assignedRoomIndex;
 
-    final success = _sendSurvivorToRoom(survivor, roomIndex);
+    final alreadyInRoom = survivor.currentRoomIndex == roomIndex;
 
-    if (!success) return;
+    if (!alreadyInRoom) {
+      final success = _sendSurvivorToRoom(survivor, roomIndex);
+
+      if (!success) {
+        // Hareket başlatılamadıysa kaynağı iade et.
+        if (isWater) {
+          resourceManager.water += 1;
+        } else {
+          resourceManager.food += 1;
+        }
+
+        survivor.workRoomIndex = previousWorkRoom;
+        survivor.assignedRoomIndex = previousAssignedRoom;
+        return;
+      }
+    }
 
     survivor.autoEating = !isWater;
     survivor.autoDrinking = isWater;
+
+    survivor.foodReserved = !isWater;
+    survivor.waterReserved = isWater;
+
     survivor.needRoomIndex = roomIndex;
     survivor.needActionTimer = 0;
+    survivor.needActionDuration = 0;
+
+    survivor.needActionStartValue = isWater ? survivor.thirst : survivor.hunger;
+
+    survivor.isWorking = false;
+
+    survivor.state = alreadyInRoom
+        ? (isWater ? SurvivorState.drinking : SurvivorState.eating)
+        : (isWater ? SurvivorState.goingToDrink : SurvivorState.goingToEat);
+
+    /*
+    debugPrint(
+      'NEED RESERVED: ${survivor.name} '
+      'type=$roomType '
+      'food=${resourceManager.food.toStringAsFixed(2)} '
+      'water=${resourceManager.water.toStringAsFixed(2)}',
+    );
+    */
   }
 
   void _finishAutomaticNeed(Survivor survivor) {
-    final workRoom = survivor.workRoomIndex;
+    if (survivor.manualNeedAction) {
+      survivor.foodReserved = false;
+      survivor.waterReserved = false;
 
-    survivor.autoEating = false;
-    survivor.autoDrinking = false;
-    survivor.needRoomIndex = null;
+      survivor.manualNeedAction = false;
+      survivor.needActionStartValue = 0;
 
-    if (workRoom == null) {
+      survivor.needActionTimer = 0;
+      survivor.needActionDuration = 0;
+      survivor.needActionStartValue = 0;
+
+      survivor.autoEating = false;
+      survivor.autoDrinking = false;
+      survivor.needRoomIndex = null;
+
+      survivor.needActionTimer = 0;
+      survivor.needActionDuration = 0;
+
+      survivor.roomAction = SurvivorRoomAction.idle;
+      survivor.workRoomIndex = null;
+
+      survivor.isWorking = false;
       survivor.state = SurvivorState.idle;
       return;
     }
 
-    _sendSurvivorToRoom(survivor, workRoom);
+    // Otomatik yemek / su işlemini tamamla.
+    survivor.autoEating = false;
+    survivor.autoDrinking = false;
+    survivor.needRoomIndex = null;
+    survivor.needActionTimer = 0;
+
+    // Manuel dinlenme sırasında ihtiyaç için ayrıldıysa
+    // tekrar yatakhaneye dön.
+    if (survivor.returnToManualRest) {
+      final bedroomIndex = survivor.manualRestRoomIndex;
+
+      survivor.returnToManualRest = false;
+      survivor.manualRestRoomIndex = null;
+
+      if (bedroomIndex != null) {
+        // Zaten yatakhanedeyse hareket ettirme.
+        if (!survivor.isMoving && survivor.currentRoomIndex == bedroomIndex) {
+          survivor.manualResting = true;
+          survivor.isWorking = false;
+          survivor.state = survivor.energy < 100
+              ? SurvivorState.sleeping
+              : SurvivorState.idle;
+          return;
+        }
+
+        // Yatakhaneye geri gönder.
+        final success = _sendSurvivorToRoom(survivor, bedroomIndex);
+
+        if (success) {
+          survivor.manualResting = true;
+          survivor.isWorking = false;
+          return;
+        }
+      }
+
+      // Yatakhaneye dönemiyorsa bekle.
+      survivor.manualResting = false;
+      survivor.isWorking = false;
+      survivor.state = SurvivorState.idle;
+      return;
+    }
+
+    // Normal çalışma odasına geri dön.
+    final workRoom = survivor.workRoomIndex;
+
+    if (workRoom == null) {
+      survivor.state = SurvivorState.idle;
+      survivor.isWorking = false;
+      return;
+    }
+
+    // Zaten çalışma odasındaysa yürütme.
+    if (!survivor.isMoving && survivor.currentRoomIndex == workRoom) {
+      survivor.state = SurvivorState.working;
+      survivor.isWorking = true;
+      return;
+    }
+
+    // Çalışma odasına geri gönder.
+    final success = _sendSurvivorToRoom(survivor, workRoom);
+
+    if (!success) {
+      survivor.state = SurvivorState.idle;
+      survivor.isWorking = false;
+    }
   }
 
   void _updateAutomaticNeeds(Survivor survivor, double dt) {
+    /*
+    if (survivor.hunger <= 25 && resourceManager.food >= 1) {
+      debugPrint(
+        'HUNGRY: ${survivor.name} '
+        'moving=${survivor.isMoving} '
+        'autoEating=${survivor.autoEating} '
+        'autoDrinking=${survivor.autoDrinking} '
+        'autoResting=${survivor.autoResting} '
+        'foodReserved=${survivor.foodReserved} '
+        'food=${resourceManager.food.toStringAsFixed(2)}',
+      );
+    }
+    */
+
     if (survivor.isMoving) return;
 
-    // Su içme
-    if (survivor.autoDrinking) {
-      survivor.state = SurvivorState.drinking;
-      survivor.isWorking = false;
+    // Karakter odaya ulaştığında işlem süresini hesapla.
+    if ((survivor.autoEating || survivor.autoDrinking) &&
+        survivor.needActionDuration == 0) {
+      final isWater = survivor.autoDrinking;
 
-      survivor.needActionTimer += dt;
+      survivor.needActionStartValue = isWater
+          ? survivor.thirst
+          : survivor.hunger;
 
-      if (survivor.needActionTimer >= 5.0) {
-        if (resourceManager.consumeWater(1)) {
-          survivor.thirst = 100;
-          survivor.needActionTimer = 0;
-          _finishAutomaticNeed(survivor);
-        } else {
-          survivor.state = SurvivorState.waitingForWater;
-        }
-      }
+      survivor.needActionDuration = _calculateNeedDuration(
+        currentValue: survivor.needActionStartValue,
+        isWater: isWater,
+      );
+
+      survivor.needActionTimer = 0;
+    }
+
+    // Su yoksa, kritik açlığı karşılayabilsin.
+    if (survivor.autoDrinking &&
+        !survivor.waterReserved &&
+        resourceManager.water < 1 &&
+        survivor.hunger <= 25 &&
+        resourceManager.food >= 1) {
+      survivor.autoDrinking = false;
+      survivor.manualNeedAction = false;
+      survivor.needRoomIndex = null;
+      survivor.needActionTimer = 0;
+      survivor.needActionDuration = 0;
+
+      _startAutomaticNeed(survivor, isWater: false);
       return;
     }
 
-    // Yemek yeme
-    if (survivor.autoEating) {
-      survivor.state = SurvivorState.eating;
-      survivor.isWorking = false;
+    // Yemek yoksa, kritik susuzluğu karşılayabilsin.
+    if (survivor.autoEating &&
+        !survivor.foodReserved &&
+        resourceManager.food < 1 &&
+        survivor.thirst <= 25 &&
+        resourceManager.water >= 1) {
+      survivor.autoEating = false;
+      survivor.manualNeedAction = false;
+      survivor.needRoomIndex = null;
+      survivor.needActionTimer = 0;
+      survivor.needActionDuration = 0;
 
-      survivor.needActionTimer += dt;
-
-      if (survivor.needActionTimer >= 8.0) {
-        if (resourceManager.consumeFood(1)) {
-          survivor.hunger = 100;
-          survivor.needActionTimer = 0;
-          _finishAutomaticNeed(survivor);
-        } else {
-          survivor.state = SurvivorState.waitingForFood;
-        }
-      }
-      return;
-    }
-
-    // Uyurken yeni ihtiyaç başlatma.
-    if (survivor.autoResting) return;
-
-    // Önce susuzluk kontrolü.
-    if (survivor.thirst <= 25) {
       _startAutomaticNeed(survivor, isWater: true);
       return;
     }
 
-    // Ardından açlık kontrolü.
-    if (survivor.hunger <= 25) {
+    // SU İÇME
+    if (survivor.autoDrinking) {
+      survivor.isWorking = false;
+
+      // Henüz su ayrılmadıysa stoktan 1 birim al.
+      if (!survivor.waterReserved) {
+        if (!resourceManager.consumeWater(1)) {
+          survivor.state = SurvivorState.waitingForWater;
+          return;
+        }
+
+        survivor.waterReserved = true;
+
+        // Bekleme sırasında susuzluk azalmış olabilir.
+        survivor.needActionStartValue = survivor.thirst;
+        survivor.needActionTimer = 0;
+        survivor.needActionDuration = _calculateNeedDuration(
+          currentValue: survivor.thirst,
+          isWater: true,
+        );
+      }
+
+      survivor.state = SurvivorState.drinking;
+      survivor.needActionTimer += dt;
+
+      _updateNeedProgress(survivor, isWater: true);
+
+      if (survivor.needActionTimer >= survivor.needActionDuration) {
+        survivor.thirst = 100;
+        survivor.waterReserved = false;
+        survivor.needActionTimer = 0;
+        _finishAutomaticNeed(survivor);
+      }
+
+      return;
+    }
+
+    // YEMEK YEME
+    if (survivor.autoEating) {
+      survivor.isWorking = false;
+
+      if (!survivor.foodReserved) {
+        if (!resourceManager.consumeFood(1)) {
+          survivor.state = SurvivorState.waitingForFood;
+          return;
+        }
+
+        survivor.foodReserved = true;
+
+        survivor.needActionStartValue = survivor.hunger;
+        survivor.needActionTimer = 0;
+        survivor.needActionDuration = _calculateNeedDuration(
+          currentValue: survivor.hunger,
+          isWater: false,
+        );
+      }
+
+      survivor.state = SurvivorState.eating;
+      survivor.needActionTimer += dt;
+
+      _updateNeedProgress(survivor, isWater: false);
+
+      if (survivor.needActionTimer >= survivor.needActionDuration) {
+        survivor.hunger = 100;
+        survivor.foodReserved = false;
+        _finishAutomaticNeed(survivor);
+      }
+
+      return;
+    }
+
+    // Manuel dinlenme
+    if (survivor.manualResting) {
+      if (survivor.thirst <= 25 || survivor.hunger <= 25) {
+        survivor.returnToManualRest = true;
+        survivor.manualRestRoomIndex = survivor.currentRoomIndex;
+        survivor.manualResting = false;
+      } else {
+        return;
+      }
+    }
+
+    // Otomatik dinlenme
+    if (survivor.autoResting) {
+      final needsWater = survivor.thirst <= 25 && resourceManager.water >= 1;
+
+      final needsFood = survivor.hunger <= 25 && resourceManager.food >= 1;
+
+      if (!needsWater && !needsFood) {
+        return;
+      }
+
+      final targetType = needsWater ? RoomType.water : RoomType.kitchen;
+
+      // Oda doluysa dinlenmeye devam et.
+      if (_findAvailableNeedRoom(survivor, targetType) == null) {
+        return;
+      }
+
+      survivor.autoResting = false;
+      survivor.restRoomIndex = null;
+    }
+
+    final needsWater = survivor.thirst <= 25 && resourceManager.water >= 1;
+
+    final needsFood = survivor.hunger <= 25 && resourceManager.food >= 1;
+
+    if (needsWater && needsFood) {
+      // Değeri daha düşük olan ihtiyaç önce karşılanır.
+      _startAutomaticNeed(survivor, isWater: survivor.thirst < survivor.hunger);
+      return;
+    }
+
+    if (needsFood) {
       _startAutomaticNeed(survivor, isWater: false);
+      return;
+    }
+
+    if (needsWater) {
+      _startAutomaticNeed(survivor, isWater: true);
+      return;
+    }
+  }
+
+  void _updateNeedProgress(Survivor survivor, {required bool isWater}) {
+    if (survivor.needActionDuration <= 0) return;
+
+    // Kaynak önceden ayrılmış olmalı.
+    if (isWater && !survivor.waterReserved) return;
+    if (!isWater && !survivor.foodReserved) return;
+
+    final progress = (survivor.needActionTimer / survivor.needActionDuration)
+        .clamp(0.0, 1.0);
+
+    final startValue = survivor.needActionStartValue.clamp(0.0, 100.0);
+
+    final value = startValue + (100.0 - startValue) * progress;
+
+    if (isWater) {
+      survivor.thirst = value;
+    } else {
+      survivor.hunger = value;
+    }
+  }
+
+  void _removeDeadSurvivors() {
+    final deadSurvivors = survivors
+        .where((survivor) => survivor.isDead)
+        .toList();
+
+    for (final survivor in deadSurvivors) {
+      if (selectedCharacter.value == survivor) {
+        selectedCharacter.value = null;
+      }
+
+      survivor.isWorking = false;
+      survivor.assignedRoomIndex = null;
+      survivor.workRoomIndex = null;
+      survivor.restRoomIndex = null;
+      survivor.needRoomIndex = null;
+
+      survivor.removeFromParent();
+      survivors.remove(survivor);
+
+      _showDeathNotification(survivor.name);
+
+      debugPrint('SURVIVOR DIED: ${survivor.name}');
     }
   }
 }

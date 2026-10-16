@@ -17,13 +17,18 @@ enum SurvivorState {
   waitingForWater,
 }
 
+enum SurvivorRoomAction { work, eat, drink, rest, idle }
+
 class Survivor extends PositionComponent {
   final String name;
   final double speed = 90;
 
   final Queue<Vector2> _path = Queue<Vector2>();
 
+  SurvivorRoomAction roomAction = SurvivorRoomAction.idle;
   SurvivorState state = SurvivorState.idle;
+
+  bool manualNeedAction = false;
 
   int age = 25;
 
@@ -39,6 +44,8 @@ class Survivor extends PositionComponent {
 
   // Otomatik dinlenme sürecinde mi?
   bool autoResting = false;
+
+  bool manualResting = false;
 
   // Hedef odaya gerçekten ulaştı mı?
   int? currentRoomIndex;
@@ -63,11 +70,23 @@ class Survivor extends PositionComponent {
   int? needRoomIndex;
   int? destinationFloor;
   double needActionTimer = 0;
+  bool returnToManualRest = false;
+  int? manualRestRoomIndex;
+  double needActionDuration = 0;
+  double needActionStartValue = 0;
+
+  bool foodReserved = false;
+  bool waterReserved = false;
+  bool isDead = false;
 
   // Dakikada azalan ihtiyaç miktarları
-  static const double hungerLossPerMinute = 12.0;
-  static const double thirstLossPerMinute = 15.0;
-  static const double healthLossPerMinute = 5.0;
+  static const double hungerLossPerMinute = 36.0; // 12 → 36
+  static const double thirstLossPerMinute = 45.0; // 15 → 45
+  static const double healthLossPerMinute = 5.0; // Değişmedi
+
+  //static const double hungerLossPerMinute = 12.0;
+  //static const double thirstLossPerMinute = 15.0;
+  //static const double healthLossPerMinute = 5.0;
 
   static const double energyConsumption = 10.0;
   static const double energyRecovery = 20.0;
@@ -75,20 +94,62 @@ class Survivor extends PositionComponent {
   //static const double energyConsumption = 2.0 / 60;
   //static const double energyRecovery = 8.0 / 60;
 
+  void checkDeath() {
+    if (isDead || health > 0) return;
+
+    health = 0;
+    isDead = true;
+
+    isWorking = false;
+    isResting = false;
+    autoEating = false;
+    autoDrinking = false;
+    autoResting = false;
+
+    state = SurvivorState.idle;
+  }
+
+  double get needActionProgress {
+    if (needActionDuration <= 0) return 0;
+
+    return (needActionTimer / needActionDuration).clamp(0.0, 1.0).toDouble();
+  }
+
   void assignToRoom(int roomIndex) {
     assignedRoomIndex = roomIndex;
     isWorking = false;
   }
 
   void updateNeeds(double dt) {
-    hunger -= hungerLossPerMinute * dt / 60;
-    thirst -= thirstLossPerMinute * dt / 60;
+    final isEating = !isMoving && state == SurvivorState.eating;
+    final isDrinking = !isMoving && state == SurvivorState.drinking;
+
+    if (!isEating) {
+      hunger -= hungerLossPerMinute * dt / 60;
+    }
+
+    if (!isDrinking) {
+      thirst -= thirstLossPerMinute * dt / 60;
+    }
 
     hunger = hunger.clamp(0.0, 100.0);
     thirst = thirst.clamp(0.0, 100.0);
 
-    if (hunger <= 10 || thirst <= 10) {
-      health -= healthLossPerMinute * dt / 60;
+    // SAĞLIK SİSTEMİ
+    double healthLoss = 0;
+
+    if (hunger <= 0) {
+      healthLoss += 100.0; // 5
+    }
+
+    if (thirst <= 0) {
+      healthLoss += 150.0; // 7
+    }
+
+    if (healthLoss > 0) {
+      health -= healthLoss * dt / 60;
+    } else if (hunger >= 50 && thirst >= 50) {
+      health += 3.0 * dt / 60;
     }
 
     health = health.clamp(0.0, 100.0);
@@ -210,19 +271,18 @@ class Survivor extends PositionComponent {
   }
 
   void updateEnergy(double dt) {
-    if (isMoving) return;
+    const double walkingEnergyLossPerMinute = 8.0;
+    const double workingEnergyLossPerMinute = 5.0;
+    const double restingEnergyGainPerMinute = 15.0;
 
-    if (autoResting) {
-      if (state == SurvivorState.sleeping) {
-        energy = (energy + energyRecovery * dt).clamp(0.0, 100.0);
-      }
-      return;
+    if (isMoving) {
+      energy -= walkingEnergyLossPerMinute * dt / 60;
+    } else if (state == SurvivorState.sleeping) {
+      energy += restingEnergyGainPerMinute * dt / 60;
+    } else if (isWorking) {
+      energy -= workingEnergyLossPerMinute * dt / 60;
     }
 
-    if (isWorking) {
-      energy = (energy - energyConsumption * dt).clamp(0.0, 100.0);
-    } else {
-      energy = (energy + energyRecovery * dt).clamp(0.0, 100.0);
-    }
+    energy = energy.clamp(0.0, 100.0);
   }
 }
