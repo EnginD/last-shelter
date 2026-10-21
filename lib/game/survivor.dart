@@ -15,6 +15,9 @@ enum SurvivorState {
   drinking,
   waitingForFood,
   waitingForWater,
+
+  goingToMedical,
+  healing,
 }
 
 enum SurvivorRoomAction { work, eat, drink, rest, idle }
@@ -44,6 +47,14 @@ class Survivor extends PositionComponent {
 
   // Otomatik dinlenme sürecinde mi?
   bool autoResting = false;
+
+  // Otomatik tedavi sistemi
+  bool autoHealing = false;
+  int? medicalRoomIndex;
+
+  // Tedavi süresi
+  double healingTimer = 0;
+  double healingDuration = 20.0;
 
   bool manualResting = false;
 
@@ -105,6 +116,9 @@ class Survivor extends PositionComponent {
     autoEating = false;
     autoDrinking = false;
     autoResting = false;
+    autoHealing = false;
+    medicalRoomIndex = null;
+    healingTimer = 0;
 
     state = SurvivorState.idle;
   }
@@ -148,10 +162,9 @@ class Survivor extends PositionComponent {
 
     if (healthLoss > 0) {
       health -= healthLoss * dt / 60;
-    } else if (hunger >= 50 && thirst >= 50) {
+    } else if (!autoHealing && hunger >= 50 && thirst >= 50 && energy >= 25) {
       health += 3.0 * dt / 60;
     }
-
     health = health.clamp(0.0, 100.0);
   }
 
@@ -271,9 +284,9 @@ class Survivor extends PositionComponent {
   }
 
   void updateEnergy(double dt) {
-    const double walkingEnergyLossPerMinute = 8.0;
-    const double workingEnergyLossPerMinute = 5.0;
-    const double restingEnergyGainPerMinute = 15.0;
+    const double walkingEnergyLossPerMinute = 12.0;
+    const double workingEnergyLossPerMinute = 15.0;
+    const double restingEnergyGainPerMinute = 25.0;
 
     if (isMoving) {
       energy -= walkingEnergyLossPerMinute * dt / 60;

@@ -211,6 +211,7 @@ class _ShelterScreenState extends State<ShelterScreen> {
                 right: 0,
                 bottom: 0,
                 child: SurvivorInfoPanel(
+                  game: game,
                   survivor: survivor,
                   roomName: _getRoomName(survivor),
                   onClose: () {

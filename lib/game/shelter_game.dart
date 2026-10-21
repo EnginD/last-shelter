@@ -103,7 +103,7 @@ class ShelterGame extends FlameGame with TapCallbacks {
     return 0.50;
   }
 
-  double _survivorEfficiency(Survivor survivor) {
+  double survivorEfficiency(Survivor survivor) {
     final health = _needMultiplier(survivor.health);
     final energy = _needMultiplier(survivor.energy);
     final hunger = _needMultiplier(survivor.hunger);
@@ -503,6 +503,10 @@ class ShelterGame extends FlameGame with TapCallbacks {
       survivor.updateNeeds(dt);
       survivor.checkDeath();
 
+      if (survivor.isDead) continue;
+
+      _updateAutomaticHealing(survivor, dt);
+
       // Ölen karakter üretim yapamaz.
       if (survivor.isDead) continue;
 
@@ -516,7 +520,7 @@ class ShelterGame extends FlameGame with TapCallbacks {
       }
 
       final room = rooms[survivor.assignedRoomIndex!];
-      final efficiency = _survivorEfficiency(survivor);
+      final efficiency = survivorEfficiency(survivor);
 
       switch (room.type) {
         case RoomType.power:
@@ -661,6 +665,96 @@ class ShelterGame extends FlameGame with TapCallbacks {
     return true;
   }
 
+  void _startAutomaticHealing(Survivor survivor) {
+    if (survivor.isDead ||
+        survivor.isMoving ||
+        survivor.autoHealing ||
+        survivor.autoEating ||
+        survivor.autoDrinking) {
+      return;
+    }
+
+    final medicalIndex = _findAvailableNeedRoom(survivor, RoomType.medical);
+
+    if (medicalIndex == null) return;
+
+    final previousWorkRoom = survivor.workRoomIndex;
+    final previousAssignedRoom = survivor.assignedRoomIndex;
+
+    // Önceki görevini koru.
+    survivor.workRoomIndex ??= survivor.assignedRoomIndex;
+
+    final alreadyInRoom = survivor.currentRoomIndex == medicalIndex;
+
+    if (!alreadyInRoom) {
+      final success = _sendSurvivorToRoom(survivor, medicalIndex);
+
+      if (!success) {
+        survivor.workRoomIndex = previousWorkRoom;
+        survivor.assignedRoomIndex = previousAssignedRoom;
+        return;
+      }
+    }
+
+    survivor.autoResting = false;
+    survivor.restRoomIndex = null;
+    survivor.autoHealing = true;
+    survivor.medicalRoomIndex = medicalIndex;
+    survivor.healingTimer = 0;
+    survivor.isWorking = false;
+
+    survivor.state = alreadyInRoom
+        ? SurvivorState.healing
+        : SurvivorState.goingToMedical;
+  }
+
+  void _updateAutomaticHealing(Survivor survivor, double dt) {
+    if (!survivor.autoHealing || survivor.isDead) return;
+
+    if (survivor.isMoving) return;
+
+    if (survivor.currentRoomIndex != survivor.medicalRoomIndex) {
+      return;
+    }
+
+    survivor.state = SurvivorState.healing;
+    survivor.isWorking = false;
+
+    survivor.healingTimer += dt;
+
+    if (survivor.healingTimer >= survivor.healingDuration) {
+      survivor.health = 100;
+      _finishAutomaticHealing(survivor);
+    }
+  }
+
+  void _finishAutomaticHealing(Survivor survivor) {
+    survivor.autoHealing = false;
+    survivor.medicalRoomIndex = null;
+    survivor.healingTimer = 0;
+
+    final workRoom = survivor.workRoomIndex;
+
+    if (workRoom == null) {
+      survivor.state = SurvivorState.idle;
+      survivor.isWorking = false;
+      return;
+    }
+
+    if (survivor.currentRoomIndex == workRoom) {
+      survivor.state = SurvivorState.working;
+      survivor.isWorking = true;
+      return;
+    }
+
+    final success = _sendSurvivorToRoom(survivor, workRoom);
+
+    if (!success) {
+      survivor.state = SurvivorState.idle;
+      survivor.isWorking = false;
+    }
+  }
+
   void _startAutomaticRest(Survivor survivor) {
     final bedroomIndex = _findAvailableBedroom(survivor);
 
@@ -711,6 +805,13 @@ class ShelterGame extends FlameGame with TapCallbacks {
       survivor.currentFloor = rooms[destination].floor;
     }
 
+    // Tedavi devam ediyorsa diğer otomatik davranışları başlatma.
+    if (survivor.autoHealing) {
+      survivor.isWorking = false;
+      survivor.state = SurvivorState.healing;
+      return;
+    }
+
     // Ardından otomatik yemek/su durumunu kontrol et.
     if (survivor.autoEating || survivor.autoDrinking) {
       survivor.isWorking = false;
@@ -749,18 +850,35 @@ class ShelterGame extends FlameGame with TapCallbacks {
       return;
     }
 
-    // Yorgunluk kontrolü
-    if (survivor.energy <= 20 && survivor.workRoomIndex != null) {
+    // Sağlık kritikse revire git.
+    if (survivor.health <= 25 &&
+        !survivor.autoEating &&
+        !survivor.autoDrinking) {
+      _startAutomaticHealing(survivor);
+
+      if (survivor.autoHealing) return;
+    }
+
+    // Kritik enerji kontrolü
+    if (survivor.energy <= 25 && survivor.workRoomIndex != null) {
       final canDrink = survivor.thirst <= 25 && resourceManager.water >= 1;
 
       final canEat = survivor.hunger <= 25 && resourceManager.food >= 1;
 
-      // Karakterin karşılanabilecek kritik ihtiyacı varsa
-      // önce _updateAutomaticNeeds() ilgilensin.
+      // Önce karşılanabilecek kritik yemek/su ihtiyacını gider.
       if (!canDrink && !canEat) {
         _startAutomaticRest(survivor);
         return;
       }
+    }
+
+    // Enerji kritik seviyedeyse ve yatak bulunamıyorsa
+    // normal çalışmaya geri dönmesin.
+    if (survivor.energy <= 25 &&
+        survivor.workRoomIndex != null &&
+        survivor.state == SurvivorState.waitingForBed) {
+      survivor.isWorking = false;
+      return;
     }
 
     // Normal çalışma
@@ -1038,6 +1156,9 @@ class ShelterGame extends FlameGame with TapCallbacks {
     */
 
     if (survivor.isMoving) return;
+
+    // Tedavi sırasında yemek/su için yeni hareket başlatma.
+    if (survivor.autoHealing) return;
 
     // Karakter odaya ulaştığında işlem süresini hesapla.
     if ((survivor.autoEating || survivor.autoDrinking) &&
