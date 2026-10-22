@@ -52,10 +52,6 @@ class Survivor extends PositionComponent {
   bool autoHealing = false;
   int? medicalRoomIndex;
 
-  // Tedavi süresi
-  double healingTimer = 0;
-  double healingDuration = 20.0;
-
   bool manualResting = false;
 
   // Hedef odaya gerçekten ulaştı mı?
@@ -88,16 +84,25 @@ class Survivor extends PositionComponent {
 
   bool foodReserved = false;
   bool waterReserved = false;
+
+  // Rezerve edilen yemek/su miktarı (iade için).
+  double reservedAmount = 0;
+
+  // Yeme/içme bittiğinde ulaşılacak değer. Stok yetmediyse 100'den azdır.
+  double needActionTarget = 100;
+
+  // Zorluk seviyesine göre açlık/susuzluk hasarı çarpanı.
+  double starvationDamageMultiplier = 1.0;
   bool isDead = false;
 
   // Dakikada azalan ihtiyaç miktarları
-  static const double hungerLossPerMinute = 36.0; // 12 → 36
-  static const double thirstLossPerMinute = 45.0; // 15 → 45
-  static const double healthLossPerMinute = 5.0; // Değişmedi
+  //static const double hungerLossPerMinute = 36.0; // 12 → 36
+  //static const double thirstLossPerMinute = 45.0; // 15 → 45
+  //static const double healthLossPerMinute = 5.0; // Değişmedi
 
-  //static const double hungerLossPerMinute = 12.0;
-  //static const double thirstLossPerMinute = 15.0;
-  //static const double healthLossPerMinute = 5.0;
+  static const double hungerLossPerMinute = 12.0;
+  static const double thirstLossPerMinute = 15.0;
+  static const double healthLossPerMinute = 5.0;
 
   static const double energyConsumption = 10.0;
   static const double energyRecovery = 20.0;
@@ -118,7 +123,6 @@ class Survivor extends PositionComponent {
     autoResting = false;
     autoHealing = false;
     medicalRoomIndex = null;
-    healingTimer = 0;
 
     state = SurvivorState.idle;
   }
@@ -152,13 +156,8 @@ class Survivor extends PositionComponent {
     // SAĞLIK SİSTEMİ
     double healthLoss = 0;
 
-    if (hunger <= 0) {
-      healthLoss += 100.0; // 5
-    }
-
-    if (thirst <= 0) {
-      healthLoss += 150.0; // 7
-    }
+    if (hunger <= 0) healthLoss += 12.0 * starvationDamageMultiplier;
+    if (thirst <= 0) healthLoss += 18.0 * starvationDamageMultiplier;
 
     if (healthLoss > 0) {
       health -= healthLoss * dt / 60;
